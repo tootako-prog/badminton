@@ -54,7 +54,7 @@ const DEFAULT_EVENTS = [{
       const evMap = {};
       DEFAULT_EVENTS.forEach(e => { evMap[e.id] = e; });
       await dbSet("events", evMap);
-      await dbSet("adminPass", "admin123");
+      await dbSet("adminPass", "0123");
     }
     initApp();
   } catch(e) {
