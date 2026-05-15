@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🏸 羽球報名系統</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Teko:wght@600&display=swap" rel="stylesheet"/>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, set, onValue, get }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+/* ════════════════════════════════════════════════════════
+   🔧 請將下方替換成你自己的 Firebase 設定
+   前往 https://console.firebase.google.com 建立專案
+   → 新增 Web 應用程式 → 複製 firebaseConfig
+   ════════════════════════════════════════════════════════ */
+const firebaseConfig = {
+  apiKey:            "YOUR_API_KEY",
+  authDomain:        "YOUR_PROJECT.firebaseapp.com",
+  databaseURL:       "https://YOUR_PROJECT-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:         "YOUR_PROJECT",
+  storageBucket:     "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId:             "YOUR_APP_ID"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+/* ── helpers ── */
+const uid = () => Math.random().toString(36).slice(2,9);
+
+async function dbGet(path) {
+  const snap = await get(ref(db, path));
+  return snap.exists() ? snap.val() : null;
+}
+function dbSet(path, val) { return set(ref(db, path), val); }
+function dbListen(path, cb) { onValue(ref(db, path), s => cb(s.val())); }
+
+/* ── defaults ── */
+const DEFAULT_EVENTS = [{
+  id:"demo1", title:"羽球同樂會", date:"2026-05-20", time:"19:00",
+  location:"XX體育館 3號場", maxPlayers:12,
+  note:"請自備球拍，球場費 NT$100/人",
+  registrations:{}, waitlist:{}
+}];
+
+/* ── init DB if empty ── */
+(async () => {
+  const existing = await dbGet("events");
+  if (!existing) {
+    const evMap = {};
+    DEFAULT_EVENTS.forEach(e => { evMap[e.id] = e; });
+    await dbSet("events", evMap);
+    await dbSet("adminPass", "admin123");
+  }
+  initApp();
+})();
+
+/* ══════════════════════════════════════════════
+   APP
+══════════════════════════════════════════════ */
+function initApp() {
+  let state = { events:{}, adminPass:"admin123", adminAuth:false, view:"events", modal:null };
+
+  /* realtime listeners */
+  dbListen("events", val => { state.events = val || {}; render(); });
+  dbListen("adminPass", val => { if(val) state.adminPass = val; });
+
+  /* ── mutations ── */
+  async function mutateEvent(id, fn) {
+    const snap = await dbGet(`events/${id}`);
+    const next = fn(snap);
+    await dbSet(`events/${id}`, next);
+  }
+
+  async function handleSignup(evId, name) {
+    name = name.trim();
+    if (!name) return flash("請輸入姓名", false);
+    const ev = await dbGet(`events/${evId}`);
+    const regs = Object.values(ev.registrations || {});
+    const wait = Object.values(ev.waitlist     || {});
+    if ([...regs,...wait].some(r => r.name === name))
+      return flash("此姓名已報名或候補", false);
+    const rec = { id:uid(), name, ts:Date.now() };
+    if (regs.length < ev.maxPlayers) {
+      await dbSet(`events/${evId}/registrations/${rec.id}`, rec);
+      flash("✅ 報名成功！");
+    } else {
+      await dbSet(`events/${evId}/waitlist/${rec.id}`, rec);
+      flash("✅ 已加入候補！");
+    }
+    closeModal();
+  }
+
+  async function handleWaitlist(evId, name) {
+    name = name.trim();
+    if (!name) return flash("請輸入姓名", false);
+    const ev = await dbGet(`events/${evId}`);
+    const regs = Object.values(ev.registrations || {});
+    const wait = Object.values(ev.waitlist     || {});
+    if ([...regs,...wait].some(r => r.name === name))
+      return flash("此姓名已報名或候補", false);
+    const rec = { id:uid(), name, ts:Date.now() };
+    await dbSet(`events/${evId}/waitlist/${rec.id}`, rec);
+    flash("✅ 已加入候補！");
+    closeModal();
+  }
+
+  async function handleCancel(evId, recId, fromList) {
+    await mutateEvent(evId, ev => {
+      const regs = { ...(ev.registrations || {}) };
+      const wait = { ...(ev.waitlist     || {}) };
+      const wasReg = fromList === "reg";
+      delete regs[recId];
+      delete wait[recId];
+      // promote first waitlist person
+      if (wasReg) {
+        const waitArr = Object.values(wait).sort((a,b)=>a.ts-b.ts);
+        if (waitArr.length > 0 && Object.keys(regs).length < ev.maxPlayers) {
+          const p = waitArr[0];
+          regs[p.id] = p;
+          delete wait[p.id];
+        }
+      }
+      return { ...ev, registrations:regs, waitlist:wait };
+    });
+    flash("已取消");
+    closeModal();
+  }
+
+  async function addEvent(f) {
+    if (!f.title||!f.date||!f.time) return flash("請填寫必要欄位",false);
+    const id = uid();
+    await dbSet(`events/${id}`, {
+      id, title:f.title, date:f.date, time:f.time,
+      location:f.location||"", maxPlayers:parseInt(f.maxPlayers)||16,
+      note:f.note||"", registrations:{}, waitlist:{}, createdAt:Date.now()
+    });
+    flash("活動已新增"); closeModal();
+  }
+
+  async function editEvent(id, f) {
+    if (!f.title||!f.date||!f.time) return flash("請填寫必要欄位",false);
+    await mutateEvent(id, ev => ({
+      ...ev, title:f.title, date:f.date, time:f.time,
+      location:f.location||"", maxPlayers:parseInt(f.maxPlayers)||16, note:f.note||""
+    }));
+    flash("已更新"); closeModal();
+  }
+
+  async function deleteEvent(id) {
+    await dbSet(`events/${id}`, null);
+    flash("活動已刪除");
+  }
+
+  async function updatePass(p) {
+    await dbSet("adminPass", p);
+    state.adminPass = p;
+    flash("密碼已更新");
+  }
+
+  /* ── UI helpers ── */
+  let flashTimer;
+  function flash(msg, ok=true) {
+    const el = document.getElementById("flash");
+    el.textContent = msg;
+    el.className = "flash show " + (ok?"ok":"err");
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => el.className="flash", 2600);
+  }
+
+  function openModal(type, data={}) { state.modal={type,...data}; render(); }
+  function closeModal() { state.modal=null; render(); }
+
+  /* ── render ── */
+  function render() {
+    const app = document.getElementById("app");
+    const evArr = Object.values(state.events)
+      .sort((a,b) => (b.createdAt||0)-(a.createdAt||0));
+
+    app.innerHTML = `
+      ${topbar()}
+      <div class="page">
+        ${state.view==="events" ? eventsPage(evArr) : adminPage(evArr)}
+      </div>
+      ${state.modal ? modalOverlay() : ""}
+    `;
+    bindEvents(evArr);
+  }
+
+  function topbar() {
+    return `<header class="topbar">
+      <div class="logo">🏸 羽球報名</div>
+      <nav>
+        <button class="nav-btn ${state.view==="events"?"active":""}" data-view="events">活動</button>
+        <button class="nav-btn ${state.view==="admin"?"active":""}"  data-view="admin">後台</button>
+      </nav>
+    </header>
+    <div class="sync-bar">🌐 多人即時同步 · Firebase Realtime Database</div>`;
+  }
+
+  function eventsPage(evArr) {
+    if (!evArr.length) return `<div class="empty">目前沒有活動</div>`;
+    return `<div class="sec-title">即將舉辦</div>` +
+      evArr.map(ev => eventCard(ev)).join("");
+  }
+
+  function eventCard(ev) {
+    const regs = Object.values(ev.registrations||{});
+    const wait = Object.values(ev.waitlist||{});
+    const full = regs.length >= ev.maxPlayers;
+    const pct  = Math.min(100, regs.length/ev.maxPlayers*100);
+    return `<div class="card">
+      <div class="card-top">
+        <h2 class="ev-title">${esc(ev.title)}</h2>
+        <span class="badge ${full?"gold":"green"}">${full?"🔶 額滿":"🟢 報名中"}</span>
+      </div>
+      <div class="meta">
+        <span>📅 ${ev.date}</span><span>🕐 ${ev.time}</span>
+        ${ev.location?`<span>📍 ${esc(ev.location)}</span>`:""}
+      </div>
+      <div class="prog-track"><div class="prog-bar ${full?"full":""}" style="width:${pct}%"></div></div>
+      <div class="prog-label">
+        <span>報名 ${regs.length} / ${ev.maxPlayers}</span>
+        <span>候補 ${wait.length}</span>
+      </div>
+      ${ev.note?`<p class="note">${esc(ev.note)}</p>`:""}
+      <div class="card-btns">
+        <button class="btn-primary" data-action="signup" data-id="${ev.id}">${full?"➕ 加入候補":"✏️ 我要報名"}</button>
+        <button class="btn-ghost"   data-action="status" data-id="${ev.id}">查看名單 / 取消</button>
+      </div>
+    </div>`;
+  }
+
+  function adminPage(evArr) {
+    if (!state.adminAuth) return `
+      <div class="login-box">
+        <div class="login-icon">🔐</div>
+        <h2>後台登入</h2>
+        <input class="inp" type="password" id="admin-pass" placeholder="管理員密碼"/>
+        <button class="btn-primary w100" id="admin-login-btn">登入</button>
+        <p class="hint">預設密碼：admin123</p>
+      </div>`;
+
+    return `
+      <div class="admin-header">
+        <div class="sec-title">後台管理</div>
+        <button class="btn-primary" data-action="addEvent">＋ 新增活動</button>
+      </div>
+      ${!evArr.length?`<div class="empty">尚無活動</div>`:""}
+      ${evArr.map(ev => adminCard(ev)).join("")}
+      <div class="card" style="margin-top:20px">
+        <div class="sec-title" style="margin-bottom:10px">更改管理員密碼</div>
+        <input class="inp" type="password" id="new-pass" placeholder="輸入新密碼" style="margin-bottom:10px"/>
+        <button class="btn-primary" id="update-pass-btn">更新密碼</button>
+      </div>`;
+  }
+
+  function adminCard(ev) {
+    const regs = Object.values(ev.registrations||{}).sort((a,b)=>a.ts-b.ts);
+    const wait = Object.values(ev.waitlist||{}).sort((a,b)=>a.ts-b.ts);
+    return `<div class="card">
+      <div class="card-top">
+        <div>
+          <div style="font-weight:800;font-size:17px">${esc(ev.title)}</div>
+          <div class="meta" style="margin-top:4px">${ev.date} ${ev.time} ${ev.location?"· "+esc(ev.location):""}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-shrink:0">
+          <button class="btn-ghost sm" data-action="editEvent" data-id="${ev.id}">✏️ 編輯</button>
+          <button class="btn-danger sm" data-action="deleteEvent" data-id="${ev.id}">刪除</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+        <span class="badge green">報名 ${regs.length}/${ev.maxPlayers}</span>
+        <span class="badge gold">候補 ${wait.length}</span>
+      </div>
+      ${regs.length?`
+        <div class="list-title">報名名單</div>
+        ${regs.map((r,i)=>`<div class="list-row">
+          <span>${i+1}. ${esc(r.name)}</span>
+          <button class="btn-ghost sm" data-action="remove" data-evid="${ev.id}" data-recid="${r.id}" data-from="reg">移除</button>
+        </div>`).join("")}`:""}
+      ${wait.length?`
+        <div class="list-title">候補名單</div>
+        ${wait.map((r,i)=>`<div class="list-row">
+          <span>候補${i+1}. ${esc(r.name)}</span>
+          <button class="btn-ghost sm" data-action="remove" data-evid="${ev.id}" data-recid="${r.id}" data-from="wait">移除</button>
+        </div>`).join("")}`:""}
+    </div>`;
+  }
+
+  /* ── Modals ── */
+  function modalOverlay() {
+    return `<div class="overlay" id="overlay"><div class="modal-wrap">${modalContent()}</div></div>`;
+  }
+
+  function modalContent() {
+    const m = state.modal;
+    const ev = m.evId ? state.events[m.evId] : null;
+    if (m.type==="signup") {
+      const regs = Object.values(ev.registrations||{});
+      const full = regs.length >= ev.maxPlayers;
+      return `<div class="modal">
+        <h3 class="modal-title">${full?"加入候補":"我要報名"}</h3>
+        <p class="modal-sub">${esc(ev.title)} · ${ev.date} ${ev.time}</p>
+        <label class="lbl">姓名 *</label>
+        <input class="inp" id="m-name" placeholder="請輸入姓名" autofocus/>
+        <div class="modal-btns">
+          ${!full?`<button class="btn-primary f1" id="m-confirm-reg">確認報名</button>`:""}
+          <button class="${full?"btn-primary":"btn-ghost"} f1" id="m-confirm-wait">加入候補</button>
+        </div>
+        <button class="btn-ghost w100 mt8" id="m-close">取消</button>
+      </div>`;
+    }
+    if (m.type==="status") {
+      const regs = Object.values(ev.registrations||{}).sort((a,b)=>a.ts-b.ts);
+      const wait = Object.values(ev.waitlist||{}).sort((a,b)=>a.ts-b.ts);
+      return `<div class="modal" style="max-width:460px">
+        <h3 class="modal-title">名單 / 取消報名</h3>
+        <div class="list-title">報名名單 ${regs.length}/${ev.maxPlayers}</div>
+        ${!regs.length?`<div class="empty-sm">尚無人報名</div>`:""}
+        ${regs.map((r,i)=>`<div class="list-row"><span>${i+1}. ${esc(r.name)}</span><span class="badge green">報名</span></div>`).join("")}
+        ${wait.length?`<div class="list-title" style="margin-top:10px">候補名單</div>
+        ${wait.map((r,i)=>`<div class="list-row"><span>候補${i+1}. ${esc(r.name)}</span><span class="badge gold">候補</span></div>`).join("")}`:""}
+        <hr class="divider"/>
+        <div class="lbl" style="margin-bottom:8px">取消我的報名</div>
+        <input class="inp" id="m-query" placeholder="輸入你的姓名搜尋"/>
+        <div class="modal-btns" style="margin-top:10px">
+          <button class="btn-primary f1" id="m-lookup">查詢</button>
+          <button class="btn-ghost f1" id="m-close">關閉</button>
+        </div>
+        <div id="m-found"></div>
+      </div>`;
+    }
+    if (m.type==="addEvent"||m.type==="editEvent") {
+      const f = m.f||{};
+      return `<div class="modal">
+        <h3 class="modal-title">${m.type==="editEvent"?"編輯活動":"新增活動"}</h3>
+        <label class="lbl">活動名稱 *</label>
+        <input class="inp" id="f-title" value="${esc(f.title||"")}" placeholder="活動名稱"/>
+        <div class="two-col">
+          <div><label class="lbl">日期 *</label><input class="inp" type="date" id="f-date" value="${f.date||""}"/></div>
+          <div><label class="lbl">時間 *</label><input class="inp" type="time" id="f-time" value="${f.time||""}"/></div>
+        </div>
+        <label class="lbl">地點</label>
+        <input class="inp" id="f-location" value="${esc(f.location||"")}" placeholder="體育館名稱"/>
+        <label class="lbl">人數上限</label>
+        <input class="inp" type="number" id="f-max" value="${f.maxPlayers||16}" min="1"/>
+        <label class="lbl">備註</label>
+        <textarea class="inp" id="f-note" rows="3" placeholder="費用、注意事項…">${esc(f.note||"")}</textarea>
+        <div class="modal-btns" style="margin-top:14px">
+          <button class="btn-primary f1" id="m-save">${m.type==="editEvent"?"儲存":"新增"}</button>
+          <button class="btn-ghost f1" id="m-close">取消</button>
+        </div>
+      </div>`;
+    }
+    return "";
+  }
+
+  /* ── bind ── */
+  function bindEvents(evArr) {
+    // nav
+    document.querySelectorAll(".nav-btn").forEach(b =>
+      b.addEventListener("click", () => { state.view=b.dataset.view; render(); }));
+
+    // overlay close
+    document.getElementById("overlay")?.addEventListener("click", e => {
+      if (e.target.id==="overlay") closeModal();
+    });
+
+    // admin login
+    document.getElementById("admin-login-btn")?.addEventListener("click", () => {
+      const p = document.getElementById("admin-pass").value;
+      if (p===state.adminPass) { state.adminAuth=true; flash("登入成功"); render(); }
+      else flash("密碼錯誤", false);
+    });
+    document.getElementById("admin-pass")?.addEventListener("keydown", e => {
+      if (e.key==="Enter") document.getElementById("admin-login-btn").click();
+    });
+
+    // update pass
+    document.getElementById("update-pass-btn")?.addEventListener("click", () => {
+      const p = document.getElementById("new-pass").value.trim();
+      if (p) updatePass(p);
+    });
+
+    // card action buttons
+    document.querySelectorAll("[data-action]").forEach(b => {
+      b.addEventListener("click", () => {
+        const a = b.dataset.action, id = b.dataset.id;
+        if (a==="signup") openModal("signup", { evId:id });
+        if (a==="status") openModal("status", { evId:id });
+        if (a==="addEvent") openModal("addEvent");
+        if (a==="editEvent") {
+          const ev = state.events[id];
+          openModal("editEvent", { evId:id, f:{ title:ev.title, date:ev.date, time:ev.time, location:ev.location, maxPlayers:ev.maxPlayers, note:ev.note } });
+        }
+        if (a==="deleteEvent") { if(confirm("確定刪除此活動？")) deleteEvent(id); }
+        if (a==="remove") handleCancel(b.dataset.evid, b.dataset.recid, b.dataset.from);
+      });
+    });
+
+    // modal buttons
+    document.getElementById("m-close")?.addEventListener("click", closeModal);
+
+    document.getElementById("m-confirm-reg")?.addEventListener("click", () => {
+      handleSignup(state.modal.evId, document.getElementById("m-name").value);
+    });
+    document.getElementById("m-confirm-wait")?.addEventListener("click", () => {
+      handleWaitlist(state.modal.evId, document.getElementById("m-name").value);
+    });
+    document.getElementById("m-name")?.addEventListener("keydown", e => {
+      if (e.key==="Enter") document.getElementById("m-confirm-reg")?.click() || document.getElementById("m-confirm-wait")?.click();
+    });
+
+    // status lookup
+    document.getElementById("m-lookup")?.addEventListener("click", () => {
+      const q = document.getElementById("m-query").value.trim();
+      if (!q) return;
+      const ev = state.events[state.modal.evId];
+      const regs = Object.values(ev.registrations||{});
+      const wait = Object.values(ev.waitlist||{});
+      const found = regs.map(r=>({...r,_l:"reg"})).concat(wait.map(r=>({...r,_l:"wait"})))
+        .find(r => r.name.includes(q));
+      const div = document.getElementById("m-found");
+      if (!found) { div.innerHTML=`<div class="empty-sm" style="color:#ff5f57">查無此人</div>`; return; }
+      div.innerHTML=`<div class="found-box">
+        <div class="found-name">${esc(found.name)}</div>
+        <div class="found-status">${found._l==="reg"?"✅ 已報名":"⏳ 候補中"}</div>
+        <button class="btn-danger w100" id="m-cancel-btn">確認取消${found._l==="reg"?"報名":"候補"}</button>
+      </div>`;
+      document.getElementById("m-cancel-btn").addEventListener("click", () =>
+        handleCancel(state.modal.evId, found.id, found._l));
+    });
+    document.getElementById("m-query")?.addEventListener("keydown", e => {
+      if (e.key==="Enter") document.getElementById("m-lookup").click();
+    });
+
+    // save event
+    document.getElementById("m-save")?.addEventListener("click", () => {
+      const f = {
+        title:    document.getElementById("f-title").value,
+        date:     document.getElementById("f-date").value,
+        time:     document.getElementById("f-time").value,
+        location: document.getElementById("f-location").value,
+        maxPlayers: document.getElementById("f-max").value,
+        note:     document.getElementById("f-note").value,
+      };
+      if (state.modal.type==="editEvent") editEvent(state.modal.evId, f);
+      else addEvent(f);
+    });
+  }
+
+  function esc(s="") { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+  render();
+}
+</script>
+
+<style>
+:root {
+  --bg:     #0c1520;
+  --panel:  #121f2e;
+  --card:   #182637;
+  --line:   #1e3048;
+  --accent: #00d68f;
+  --gold:   #f5a623;
+  --danger: #ff5f57;
+  --text:   #dce8f5;
+  --sub:    #7a9ab5;
+  --muted:  #3a5570;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans TC', sans-serif;
+  min-height: 100vh;
+}
+
+/* ── Topbar ── */
+.topbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; height: 54px;
+  position: sticky; top: 0; z-index: 100;
+}
+.logo { font-family: 'Teko', sans-serif; font-size: 26px; letter-spacing: 2px; color: var(--accent); }
+nav { display: flex; gap: 6px; }
+.nav-btn {
+  padding: 5px 16px; border-radius: 20px; border: none; cursor: pointer;
+  font-weight: 700; font-size: 13px; font-family: inherit;
+  background: transparent; color: var(--sub); transition: all .2s;
+}
+.nav-btn.active { background: var(--accent); color: #0c1520; }
+.sync-bar {
+  text-align: center; padding: 5px; font-size: 11px;
+  color: var(--muted); background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+/* ── Page ── */
+.page { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
+.sec-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+.empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 15px; }
+.empty-sm { font-size: 13px; color: var(--muted); padding: 8px 0; }
+
+/* ── Card ── */
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 18px; padding: 22px; margin-bottom: 16px;
+}
+.card-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+.ev-title { font-size: 20px; font-weight: 900; color: var(--text); }
+.meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 9px; font-size: 13px; color: var(--sub); }
+.note { font-size: 13px; color: var(--sub); margin-top: 10px; }
+
+/* Progress */
+.prog-track { height: 5px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
+.prog-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width .5s; }
+.prog-bar.full { background: var(--gold); }
+.prog-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 5px; }
+
+/* Card buttons */
+.card-btns { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+/* ── Badges ── */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  border-radius: 8px; padding: 3px 10px; font-size: 12px; font-weight: 700;
+}
+.badge.green { background: #00d68f20; color: var(--accent); border: 1px solid #00d68f44; }
+.badge.gold  { background: #f5a62320; color: var(--gold);   border: 1px solid #f5a62344; }
+
+/* ── Buttons ── */
+.btn-primary, .btn-ghost, .btn-danger {
+  padding: 10px 22px; border-radius: 10px; cursor: pointer;
+  font-weight: 700; font-size: 14px; font-family: inherit;
+  transition: opacity .15s; border: none;
+}
+.btn-primary { background: var(--accent); color: #0c1520; }
+.btn-ghost   { background: transparent; color: var(--sub); border: 1px solid var(--line); }
+.btn-danger  { background: var(--danger); color: #fff; }
+.btn-primary:hover { opacity: .85; }
+.btn-ghost:hover   { background: var(--line); }
+.btn-danger:hover  { opacity: .85; }
+.sm { padding: 5px 12px !important; font-size: 12px !important; }
+.w100 { width: 100%; }
+.mt8 { margin-top: 8px; }
+.f1 { flex: 1; }
+
+/* ── Inputs ── */
+.inp {
+  width: 100%; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 14px; color: var(--text);
+  font-size: 14px; font-family: inherit; outline: none;
+  margin-bottom: 12px; display: block;
+}
+.inp:focus { border-color: var(--accent); }
+textarea.inp { resize: vertical; }
+.lbl { font-size: 12px; color: var(--sub); font-weight: 700; margin-bottom: 5px; display: block; }
+
+/* ── Admin ── */
+.admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.list-title { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: 1px; margin: 10px 0 5px; }
+.list-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 14px;
+}
+
+/* ── Login ── */
+.login-box {
+  max-width: 360px; margin: 60px auto; padding: 28px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 20px; text-align: center;
+}
+.login-icon { font-size: 44px; margin-bottom: 8px; }
+.login-box h2 { color: var(--accent); margin-bottom: 20px; font-size: 20px; }
+.hint { font-size: 11px; color: var(--muted); margin-top: 12px; }
+
+/* ── Modal ── */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.75);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200; padding: 16px;
+}
+.modal-wrap { width: 100%; max-width: 440px; }
+.modal {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 20px; padding: 28px;
+  max-height: 90vh; overflow-y: auto;
+}
+.modal-title { font-size: 18px; font-weight: 800; color: var(--accent); margin-bottom: 4px; }
+.modal-sub   { font-size: 13px; color: var(--sub); margin-bottom: 18px; }
+.modal-btns  { display: flex; gap: 10px; }
+.two-col     { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.divider     { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.found-box   { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 12px; }
+.found-name  { font-weight: 700; font-size: 16px; }
+.found-status{ font-size: 13px; color: var(--sub); margin: 4px 0 12px; }
+
+/* ── Flash ── */
+.flash {
+  position: fixed; top: -60px; left: 50%; transform: translateX(-50%);
+  padding: 9px 24px; border-radius: 99px; font-weight: 700; font-size: 13px;
+  z-index: 999; white-space: nowrap; pointer-events: none;
+  transition: top .3s ease;
+}
+.flash.show { top: 14px; }
+.flash.ok  { background: var(--accent); color: #0c1520; }
+.flash.err { background: var(--danger); color: #fff; }
+
+/* ── Date/time picker ── */
+input[type=date]::-webkit-calendar-picker-indicator,
+input[type=time]::-webkit-calendar-picker-indicator { filter: invert(.6); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
+
+/* ── Mobile ── */
+@media (max-width: 500px) {
+  .two-col { grid-template-columns: 1fr; }
+  .card-btns { flex-direction: column; }
+  .modal-btns { flex-direction: column; }
+}
+</style>
+</head>
+<body>
+<div id="flash" class="flash"></div>
+<div id="app">
+  <div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#3a5570">
+    <div style="font-size:44px">🏸</div>
+    <div>連接資料庫中…</div>
+  </div>
+</div>
+</body>
+</html>
