@@ -24,7 +24,6 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
-
 const uid = () => Math.random().toString(36).slice(2,9);
 
 async function dbGet(path) {
@@ -62,12 +61,15 @@ const DEFAULT_EVENTS = [{
 })();
 
 function initApp() {
-  let state = { events:{}, adminPass:"admin123", adminAuth:false, view:"events", modal:null };
+  let state = {
+    events:{}, adminPass:"admin123", adminAuth:false,
+    view:"events", modal:null,
+    lastEventFields: null   // 記住上次新增活動的內容
+  };
 
-  dbListen("events",    val => { state.events    = val || {}; render(); });
+  dbListen("events",    val => { state.events = val || {}; render(); });
   dbListen("adminPass", val => { if(val) state.adminPass = val; });
 
-  /* ── DB mutations ── */
   async function mutateEvent(id, fn) {
     const snap = await dbGet(`events/${id}`);
     await dbSet(`events/${id}`, fn(snap));
@@ -106,6 +108,24 @@ function initApp() {
     closeModal();
   }
 
+  async function handleAdminAdd(evId, name, toList) {
+    name = name.trim();
+    if (!name) return flash("請輸入姓名", false);
+    const ev = await dbGet(`events/${evId}`);
+    const regs = Object.values(ev.registrations || {});
+    const wait = Object.values(ev.waitlist || {});
+    if ([...regs,...wait].some(r => r.name === name))
+      return flash("此姓名已存在", false);
+    const rec = { id:uid(), name, ts:Date.now(), paid:false };
+    if (toList === "reg") {
+      await dbSet(`events/${evId}/registrations/${rec.id}`, rec);
+      flash(`✅ 已將「${name}」加入報名名單`);
+    } else {
+      await dbSet(`events/${evId}/waitlist/${rec.id}`, rec);
+      flash(`✅ 已將「${name}」加入候補名單`);
+    }
+  }
+
   async function handleCancel(evId, recId, fromList) {
     await mutateEvent(evId, ev => {
       const regs = { ...(ev.registrations || {}) };
@@ -142,6 +162,7 @@ function initApp() {
       location:f.location||"", maxPlayers:parseInt(f.maxPlayers)||16,
       note:f.note||"", registrations:{}, waitlist:{}, createdAt:Date.now()
     });
+    state.lastEventFields = { ...f };   // 儲存供下次預填
     flash("活動已新增"); closeModal();
   }
 
@@ -165,7 +186,6 @@ function initApp() {
     flash("密碼已更新");
   }
 
-  /* ── Flash ── */
   let flashTimer;
   function flash(msg, ok=true) {
     const el = document.getElementById("flash");
@@ -177,9 +197,7 @@ function initApp() {
   function openModal(type, data={}) { state.modal={type,...data}; render(); }
   function closeModal() { state.modal=null; render(); }
 
-  /* ══════════════════════════════════
-     RENDER
-  ══════════════════════════════════ */
+  /* ══ RENDER ══ */
   function render() {
     const appEl = document.getElementById("app");
     const evArr = Object.values(state.events).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
@@ -228,7 +246,6 @@ function initApp() {
         <span>候補 ${wait.length} 人</span>
       </div>
       ${ev.note?`<p class="note">${esc(ev.note)}</p>`:""}
-
       <div class="card-btns">
         <button class="btn-primary" data-action="signup" data-id="${ev.id}">
           ${full?"➕ 加入候補":"✏️ 我要報名"}
@@ -238,30 +255,36 @@ function initApp() {
         </button>
       </div>
 
-      <!-- 公開名單 -->
+      <!-- 公開名單 + 前台繳費勾選 -->
       <div class="pub-list">
         <div class="pub-list-hd">
           <span>📋 報名名單</span>
-          <span class="paid-pill">已繳費 ${paidCount} / ${regs.length}</span>
+          <span class="paid-pill">💛 已繳費 ${paidCount} / ${regs.length}</span>
         </div>
         ${!regs.length
           ? `<div class="empty-sm">尚無人報名，快來搶位！</div>`
-          : regs.map((r,i)=>`
-            <div class="pub-row">
+          : regs.map((r,i) => `
+            <div class="pub-row${r.paid?" pub-paid-row":""}">
               <span class="pub-num">${i+1}</span>
               <span class="pub-name">${esc(r.name)}</span>
-              <span class="pub-paid ${r.paid?"is-paid":""}">${r.paid?"✅ 已繳費":"—"}</span>
+              <label class="pub-toggle">
+                <input type="checkbox" class="pub-pay-cb"
+                  data-evid="${ev.id}" data-recid="${r.id}" data-from="reg"
+                  ${r.paid?"checked":""}>
+                <span class="pub-tog-wrap">
+                  <span class="pub-tog-track"><span class="pub-tog-thumb"></span></span>
+                  <span class="pub-tog-lbl">${r.paid?"✅ 已繳費":"未繳費"}</span>
+                </span>
+              </label>
             </div>`).join("")
         }
         ${wait.length ? `
-          <div class="pub-list-hd" style="margin-top:14px">
-            <span>⏳ 候補名單</span>
-          </div>
+          <div class="pub-list-hd" style="margin-top:14px"><span>⏳ 候補名單</span></div>
           ${wait.map((r,i)=>`
             <div class="pub-row wait-row">
               <span class="pub-num">候${i+1}</span>
               <span class="pub-name">${esc(r.name)}</span>
-              <span class="pub-paid">候補中</span>
+              <span class="pub-txt-muted">候補中</span>
             </div>`).join("")}
         ` : ""}
       </div>
@@ -309,14 +332,11 @@ function initApp() {
           <button class="btn-danger sm" data-action="deleteEvent" data-id="${ev.id}">刪除</button>
         </div>
       </div>
-
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <span class="badge green">報名 ${regs.length}/${ev.maxPlayers}</span>
         <span class="badge gold">候補 ${wait.length}</span>
-        <span class="badge blue">已繳費 ${paidCount}/${regs.length}</span>
+        <span class="badge yellow">已繳費 ${paidCount}/${regs.length}</span>
       </div>
-
-      <!-- 繳費管理表 -->
       ${regs.length ? `
         <div class="pay-table">
           <div class="pay-head">
@@ -339,12 +359,11 @@ function initApp() {
               </span>
               <span class="col-del">
                 <button class="btn-ghost sm icon-btn" data-action="remove"
-                  data-evid="${ev.id}" data-recid="${r.id}" data-from="reg" title="移除">✕</button>
+                  data-evid="${ev.id}" data-recid="${r.id}" data-from="reg">✕</button>
               </span>
             </div>`).join("")}
         </div>
       ` : `<div class="empty-sm" style="margin-top:10px">尚無報名</div>`}
-
       ${wait.length ? `
         <div class="list-title" style="margin-top:14px">候補名單</div>
         ${wait.map((r,i)=>`
@@ -354,6 +373,14 @@ function initApp() {
               data-evid="${ev.id}" data-recid="${r.id}" data-from="wait">✕ 移除</button>
           </div>`).join("")}
       ` : ""}
+      <div class="admin-add-box">
+        <div class="list-title">➕ 直接追加報名</div>
+        <div class="admin-add-row">
+          <input class="inp admin-add-inp" id="add-name-${ev.id}" placeholder="輸入姓名" style="margin-bottom:0"/>
+          <button class="btn-primary sm" data-action="adminAddReg" data-id="${ev.id}">加入報名</button>
+          <button class="btn-ghost sm" data-action="adminAddWait" data-id="${ev.id}">加入候補</button>
+        </div>
+      </div>
     </div>`;
   }
 
@@ -396,8 +423,11 @@ function initApp() {
       </div>`;
     }
 
-    if (m.type==="addEvent"||m.type==="editEvent") {
-      const f = m.f||{};
+    if (m.type==="addEvent" || m.type==="editEvent") {
+      // 編輯：讀取活動現有資料；新增：沿用上次欄位
+      const f = m.type==="editEvent"
+        ? (m.f || {})
+        : (state.lastEventFields || {});
       return `<div class="modal">
         <h3 class="modal-title">${m.type==="editEvent"?"編輯活動":"新增活動"}</h3>
         <label class="lbl">活動名稱 *</label>
@@ -444,14 +474,23 @@ function initApp() {
       if (p) updatePass(p);
     });
 
-    /* 繳費 toggle */
+    /* 前台繳費 toggle */
+    document.querySelectorAll(".pub-pay-cb").forEach(cb => {
+      cb.addEventListener("change", () => {
+        // 即時更新旁邊文字，不等 Firebase round-trip
+        const lbl = cb.closest(".pub-toggle").querySelector(".pub-tog-lbl");
+        if (lbl) lbl.textContent = cb.checked ? "✅ 已繳費" : "未繳費";
+        togglePaid(cb.dataset.evid, cb.dataset.recid, cb.dataset.from, cb.checked);
+      });
+    });
+
+    /* 後台繳費 toggle */
     document.querySelectorAll(".pay-cb").forEach(cb => {
       cb.addEventListener("change", () => {
         togglePaid(cb.dataset.evid, cb.dataset.recid, cb.dataset.from, cb.checked);
       });
     });
 
-    /* action buttons */
     document.querySelectorAll("[data-action]").forEach(b => {
       b.addEventListener("click", () => {
         const a=b.dataset.action, id=b.dataset.id;
@@ -460,10 +499,21 @@ function initApp() {
         if (a==="addEvent")    openModal("addEvent");
         if (a==="editEvent") {
           const ev = state.events[id];
-          openModal("editEvent", { evId:id, f:{ title:ev.title, date:ev.date, time:ev.time, location:ev.location, maxPlayers:ev.maxPlayers, note:ev.note }});
+          openModal("editEvent", {
+            evId: id,
+            f: {
+              title:ev.title, date:ev.date, time:ev.time,
+              location:ev.location||"", maxPlayers:ev.maxPlayers, note:ev.note||""
+            }
+          });
         }
         if (a==="deleteEvent") { if(confirm("確定刪除此活動？")) deleteEvent(id); }
         if (a==="remove") handleCancel(b.dataset.evid, b.dataset.recid, b.dataset.from);
+        if (a==="adminAddReg" || a==="adminAddWait") {
+          const inp = document.getElementById(`add-name-${id}`);
+          const name = inp ? inp.value : "";
+          handleAdminAdd(id, name, a==="adminAddReg"?"reg":"wait").then(()=>{ if(inp) inp.value=""; });
+        }
       });
     });
 
@@ -483,7 +533,7 @@ function initApp() {
       const ev   = state.events[state.modal.evId];
       const regs = Object.values(ev.registrations||{});
       const wait = Object.values(ev.waitlist||{});
-      const found = [...regs.map(r=>({...r,_l:"reg"})), ...wait.map(r=>({...r,_l:"wait"}))]
+      const found = [...regs.map(r=>({...r,_l:"reg"})),...wait.map(r=>({...r,_l:"wait"}))]
         .find(r => r.name.includes(q));
       const div = document.getElementById("m-found");
       if (!found) {
@@ -514,6 +564,15 @@ function initApp() {
       };
       state.modal.type==="editEvent" ? editEvent(state.modal.evId, f) : addEvent(f);
     });
+
+    document.querySelectorAll(".admin-add-inp").forEach(inp => {
+      inp.addEventListener("keydown", e => {
+        if (e.key==="Enter") {
+          const evId = inp.id.replace("add-name-","");
+          handleAdminAdd(evId, inp.value, "reg").then(()=>{ inp.value=""; });
+        }
+      });
+    });
   }
 
   function esc(s="") {
@@ -521,145 +580,160 @@ function initApp() {
       .replace(/&/g,"&amp;").replace(/</g,"&lt;")
       .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
-
   render();
 }
 </script>
 
 <style>
 :root {
-  --bg:     #0c1520;
-  --panel:  #121f2e;
-  --card:   #182637;
-  --line:   #1e3048;
-  --accent: #00d68f;
-  --gold:   #f5a623;
-  --blue:   #4da6ff;
-  --danger: #ff5f57;
-  --text:   #dce8f5;
-  --sub:    #7a9ab5;
-  --muted:  #3a5570;
+  --bg:          #0c1520;
+  --panel:       #121f2e;
+  --card:        #182637;
+  --line:        #1e3048;
+  --accent:      #00d68f;
+  --gold:        #f5c518;
+  --gold-bright: #ffe033;
+  --blue:        #4da6ff;
+  --danger:      #ff5f57;
+  --text:        #dce8f5;
+  --sub:         #7a9ab5;
+  --muted:       #3a5570;
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: 'Noto Sans TC', sans-serif; min-height: 100vh; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Noto Sans TC',sans-serif;min-height:100vh}
 
-/* ── Topbar ── */
-.topbar { background: var(--panel); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; height: 54px; position: sticky; top: 0; z-index: 100; }
-.logo { font-family: 'Teko', sans-serif; font-size: 26px; letter-spacing: 2px; color: var(--accent); }
-nav { display: flex; gap: 6px; }
-.nav-btn { padding: 5px 16px; border-radius: 20px; border: none; cursor: pointer; font-weight: 700; font-size: 13px; font-family: inherit; background: transparent; color: var(--sub); transition: all .2s; }
-.nav-btn.active { background: var(--accent); color: #0c1520; }
+/* topbar */
+.topbar{background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:54px;position:sticky;top:0;z-index:100}
+.logo{font-family:'Teko',sans-serif;font-size:26px;letter-spacing:2px;color:var(--accent)}
+nav{display:flex;gap:6px}
+.nav-btn{padding:5px 16px;border-radius:20px;border:none;cursor:pointer;font-weight:700;font-size:13px;font-family:inherit;background:transparent;color:var(--sub);transition:all .2s}
+.nav-btn.active{background:var(--accent);color:#0c1520}
 
-/* ── Page ── */
-.page { max-width: 700px; margin: 0 auto; padding: 20px 16px 40px; }
-.sec-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
-.empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 15px; }
-.empty-sm { font-size: 13px; color: var(--muted); padding: 6px 0; }
+/* page */
+.page{max-width:700px;margin:0 auto;padding:20px 16px 40px}
+.sec-title{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent)}
+.empty{text-align:center;color:var(--muted);padding:60px 0;font-size:15px}
+.empty-sm{font-size:13px;color:var(--muted);padding:6px 0}
 
-/* ── Card ── */
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; margin-bottom: 16px; }
-.card-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
-.ev-title { font-size: 20px; font-weight: 900; }
-.meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 9px; font-size: 13px; color: var(--sub); }
-.note { font-size: 13px; color: var(--sub); margin-top: 10px; }
+/* card */
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:16px}
+.card-top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px}
+.ev-title{font-size:20px;font-weight:900}
+.meta{display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:9px;font-size:13px;color:var(--sub)}
+.note{font-size:13px;color:var(--sub);margin-top:10px}
+.prog-track{height:5px;border-radius:99px;background:var(--line);margin-top:14px;overflow:hidden}
+.prog-bar{height:100%;background:var(--accent);border-radius:99px;transition:width .5s}
+.prog-bar.full{background:var(--gold)}
+.prog-label{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:5px}
+.card-btns{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
 
-.prog-track { height: 5px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
-.prog-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width .5s; }
-.prog-bar.full { background: var(--gold); }
-.prog-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 5px; }
-.card-btns { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+/* 前台名單 */
+.pub-list{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.pub-list-hd{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:8px}
+.paid-pill{font-size:11px;color:var(--gold-bright);background:#ffe03318;border:1px solid #ffe03344;padding:2px 10px;border-radius:99px}
 
-/* ── Public list ── */
-.pub-list { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
-.pub-list-hd { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; color: var(--sub); margin-bottom: 8px; }
-.paid-pill { font-size: 11px; color: var(--accent); background: #00d68f15; border: 1px solid #00d68f33; padding: 2px 9px; border-radius: 99px; }
-.pub-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
-.pub-row:last-child { border-bottom: none; }
-.wait-row { opacity: .65; }
-.pub-num  { flex: 0 0 24px; font-size: 11px; color: var(--muted); font-weight: 700; }
-.pub-name { flex: 1; font-size: 14px; font-weight: 600; }
-.pub-paid { font-size: 12px; color: var(--muted); }
-.pub-paid.is-paid { color: var(--accent); }
+.pub-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;margin-bottom:3px;border:1px solid transparent;transition:background .25s,border-color .25s}
+/* 已繳費那行 → 亮黃背景 */
+.pub-paid-row{background:#ffe03314;border-color:#ffe03338 !important}
+.wait-row{opacity:.6}
+.pub-num{flex:0 0 24px;font-size:11px;color:var(--muted);font-weight:700}
+.pub-name{flex:1;font-size:14px;font-weight:600}
+.pub-txt-muted{font-size:12px;color:var(--muted)}
 
-/* ── Badges ── */
-.badge { display: inline-flex; align-items: center; border-radius: 8px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
-.badge.green { background:#00d68f18; color:var(--accent); border:1px solid #00d68f44; }
-.badge.gold  { background:#f5a62318; color:var(--gold);   border:1px solid #f5a62344; }
-.badge.blue  { background:#4da6ff18; color:var(--blue);   border:1px solid #4da6ff44; }
+/* 前台繳費 toggle */
+.pub-toggle{display:inline-flex;align-items:center;cursor:pointer;user-select:none}
+.pub-toggle input{display:none}
+.pub-tog-wrap{display:inline-flex;align-items:center;gap:7px}
+.pub-tog-track{width:36px;height:20px;border-radius:99px;background:var(--line);position:relative;transition:background .22s,box-shadow .22s;flex-shrink:0}
+.pub-tog-thumb{position:absolute;width:14px;height:14px;border-radius:50%;background:var(--sub);top:3px;left:3px;transition:transform .22s,background .22s}
+.pub-toggle input:checked ~ .pub-tog-wrap .pub-tog-track{background:var(--gold-bright);box-shadow:0 0 10px #ffe03366}
+.pub-toggle input:checked ~ .pub-tog-wrap .pub-tog-track .pub-tog-thumb{transform:translateX(16px);background:#0c1520}
+.pub-tog-lbl{font-size:12px;font-weight:700;color:var(--muted);transition:color .22s,text-shadow .22s;white-space:nowrap}
+.pub-toggle input:checked ~ .pub-tog-wrap .pub-tog-lbl{color:var(--gold-bright);text-shadow:0 0 8px #ffe03377}
 
-/* ── Buttons ── */
-.btn-primary,.btn-ghost,.btn-danger { padding:10px 22px; border-radius:10px; cursor:pointer; font-weight:700; font-size:14px; font-family:inherit; transition:opacity .15s; border:none; }
-.btn-primary { background:var(--accent); color:#0c1520; }
-.btn-ghost   { background:transparent; color:var(--sub); border:1px solid var(--line); }
-.btn-danger  { background:var(--danger); color:#fff; }
-.btn-primary:hover { opacity:.85; } .btn-ghost:hover { background:var(--line); } .btn-danger:hover { opacity:.85; }
-.sm { padding:5px 12px !important; font-size:12px !important; border-radius:8px !important; }
-.icon-btn { padding:4px 8px !important; }
-.w100 { width:100%; } .mt8 { margin-top:8px; } .f1 { flex:1; }
+/* badges */
+.badge{display:inline-flex;align-items:center;border-radius:8px;padding:3px 10px;font-size:12px;font-weight:700}
+.badge.green{background:#00d68f18;color:var(--accent);border:1px solid #00d68f44}
+.badge.gold{background:#f5c51818;color:var(--gold);border:1px solid #f5c51844}
+.badge.blue{background:#4da6ff18;color:var(--blue);border:1px solid #4da6ff44}
+.badge.yellow{background:#ffe03318;color:var(--gold-bright);border:1px solid #ffe03344}
 
-/* ── Inputs ── */
-.inp { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; margin-bottom:12px; display:block; }
-.inp:focus { border-color:var(--accent); }
-textarea.inp { resize:vertical; }
-.lbl { font-size:12px; color:var(--sub); font-weight:700; margin-bottom:5px; display:block; }
+/* buttons */
+.btn-primary,.btn-ghost,.btn-danger{padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;font-size:14px;font-family:inherit;transition:opacity .15s;border:none}
+.btn-primary{background:var(--accent);color:#0c1520}
+.btn-ghost{background:transparent;color:var(--sub);border:1px solid var(--line)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-primary:hover{opacity:.85}.btn-ghost:hover{background:var(--line)}.btn-danger:hover{opacity:.85}
+.sm{padding:5px 12px !important;font-size:12px !important;border-radius:8px !important}
+.icon-btn{padding:4px 8px !important}
+.w100{width:100%}.mt8{margin-top:8px}.f1{flex:1}
 
-/* ── Pay table ── */
-.pay-table { margin-top:12px; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
-.pay-head,.pay-row { display:flex; align-items:center; gap:8px; padding:8px 14px; }
-.pay-head { background:var(--bg); font-size:11px; font-weight:700; color:var(--muted); letter-spacing:1px; border-bottom:1px solid var(--line); }
-.pay-row { border-bottom:1px solid var(--line); font-size:14px; transition:background .15s; }
-.pay-row:last-child { border-bottom:none; }
-.pay-row.row-paid { background:#00d68f08; }
-.col-num  { flex:0 0 24px; font-size:12px; color:var(--muted); font-weight:700; }
-.col-name { flex:1; font-weight:600; }
-.col-paid { flex:0 0 56px; display:flex; justify-content:center; }
-.col-del  { flex:0 0 36px; display:flex; justify-content:flex-end; }
+/* inputs */
+.inp{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 14px;color:var(--text);font-size:14px;font-family:inherit;outline:none;margin-bottom:12px;display:block}
+.inp:focus{border-color:var(--accent)}
+textarea.inp{resize:vertical}
+.lbl{font-size:12px;color:var(--sub);font-weight:700;margin-bottom:5px;display:block}
 
-/* Toggle switch */
-.toggle { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
-.toggle input { opacity:0; width:0; height:0; position:absolute; }
-.tog-track { width:38px; height:20px; background:var(--line); border-radius:99px; position:relative; transition:background .2s; }
-.tog-thumb { position:absolute; width:14px; height:14px; background:var(--sub); border-radius:50%; top:3px; left:3px; transition:transform .2s, background .2s; }
-.toggle input:checked ~ .tog-track { background:var(--accent); }
-.toggle input:checked ~ .tog-track .tog-thumb { transform:translateX(18px); background:#0c1520; }
+/* 後台 pay table */
+.pay-table{margin-top:12px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.pay-head,.pay-row{display:flex;align-items:center;gap:8px;padding:8px 14px}
+.pay-head{background:var(--bg);font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;border-bottom:1px solid var(--line)}
+.pay-row{border-bottom:1px solid var(--line);font-size:14px;transition:background .15s}
+.pay-row:last-child{border-bottom:none}
+.pay-row.row-paid{background:#ffe03309}
+.col-num{flex:0 0 24px;font-size:12px;color:var(--muted);font-weight:700}
+.col-name{flex:1;font-weight:600}
+.col-paid{flex:0 0 56px;display:flex;justify-content:center}
+.col-del{flex:0 0 36px;display:flex;justify-content:flex-end}
 
-/* ── Admin ── */
-.admin-hd { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
-.list-title { font-size:11px; color:var(--muted); font-weight:700; letter-spacing:1px; margin:10px 0 5px; }
-.list-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); font-size:14px; }
+/* 後台 toggle — 亮黃 */
+.toggle{position:relative;display:inline-flex;align-items:center;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.tog-track{width:38px;height:20px;background:var(--line);border-radius:99px;position:relative;transition:background .2s,box-shadow .2s}
+.tog-thumb{position:absolute;width:14px;height:14px;background:var(--sub);border-radius:50%;top:3px;left:3px;transition:transform .2s,background .2s}
+.toggle input:checked ~ .tog-track{background:var(--gold-bright);box-shadow:0 0 10px #ffe03355}
+.toggle input:checked ~ .tog-track .tog-thumb{transform:translateX(18px);background:#0c1520}
 
-/* ── Login ── */
-.login-box { max-width:360px; margin:60px auto; padding:28px; background:var(--card); border:1px solid var(--line); border-radius:20px; text-align:center; }
-.login-box h2 { color:var(--accent); margin-bottom:20px; font-size:20px; }
-.hint { font-size:11px; color:var(--muted); margin-top:12px; }
+/* admin */
+.admin-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+.list-title{font-size:11px;color:var(--muted);font-weight:700;letter-spacing:1px;margin:10px 0 5px}
+.list-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
+.admin-add-box{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.admin-add-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.admin-add-row .inp{flex:1;min-width:120px;margin-bottom:0}
 
-/* ── Modal ── */
-.overlay { position:fixed; inset:0; background:rgba(0,0,0,.75); display:flex; align-items:center; justify-content:center; z-index:200; padding:16px; }
-.modal-wrap { width:100%; max-width:440px; }
-.modal { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:28px; max-height:90vh; overflow-y:auto; }
-.modal-title { font-size:18px; font-weight:800; color:var(--accent); margin-bottom:4px; }
-.modal-sub   { font-size:13px; color:var(--sub); margin-bottom:18px; }
-.modal-btns  { display:flex; gap:10px; }
-.two-col     { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-.found-box   { background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-top:14px; }
-.found-name  { font-weight:700; font-size:16px; margin-bottom:4px; }
-.found-status{ font-size:13px; color:var(--sub); margin-bottom:12px; }
+/* login */
+.login-box{max-width:360px;margin:60px auto;padding:28px;background:var(--card);border:1px solid var(--line);border-radius:20px;text-align:center}
+.login-box h2{color:var(--accent);margin-bottom:20px;font-size:20px}
+.hint{font-size:11px;color:var(--muted);margin-top:12px}
 
-/* ── Flash ── */
-.flash { position:fixed; top:-60px; left:50%; transform:translateX(-50%); padding:9px 24px; border-radius:99px; font-weight:700; font-size:13px; z-index:999; white-space:nowrap; pointer-events:none; transition:top .3s ease; }
-.flash.show { top:14px; }
-.flash.ok  { background:var(--accent); color:#0c1520; }
-.flash.err { background:var(--danger); color:#fff; }
+/* modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px}
+.modal-wrap{width:100%;max-width:440px}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:28px;max-height:90vh;overflow-y:auto}
+.modal-title{font-size:18px;font-weight:800;color:var(--accent);margin-bottom:4px}
+.modal-sub{font-size:13px;color:var(--sub);margin-bottom:18px}
+.modal-btns{display:flex;gap:10px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.found-box{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-top:14px}
+.found-name{font-weight:700;font-size:16px;margin-bottom:4px}
+.found-status{font-size:13px;color:var(--sub);margin-bottom:12px}
+
+/* flash */
+.flash{position:fixed;top:-60px;left:50%;transform:translateX(-50%);padding:9px 24px;border-radius:99px;font-weight:700;font-size:13px;z-index:999;white-space:nowrap;pointer-events:none;transition:top .3s ease}
+.flash.show{top:14px}
+.flash.ok{background:var(--accent);color:#0c1520}
+.flash.err{background:var(--danger);color:#fff}
 
 input[type=date]::-webkit-calendar-picker-indicator,
-input[type=time]::-webkit-calendar-picker-indicator { filter:invert(.6); }
-::-webkit-scrollbar { width:5px; }
-::-webkit-scrollbar-thumb { background:var(--line); border-radius:99px; }
+input[type=time]::-webkit-calendar-picker-indicator{filter:invert(.6)}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
 
-@media (max-width:500px) {
-  .two-col { grid-template-columns:1fr; }
-  .card-btns { flex-direction:column; }
-  .modal-btns { flex-direction:column; }
+@media(max-width:500px){
+  .two-col{grid-template-columns:1fr}
+  .card-btns,.modal-btns,.admin-add-row{flex-direction:column}
+  .admin-add-row .inp{width:100%}
 }
 </style>
 </head>
