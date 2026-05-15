@@ -8,12 +8,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Teko:wght@600&display=swap" rel="stylesheet"/>
 
 <script type="module">
-// ✅ 正確的 Firebase CDN import（只寫一次）
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getDatabase, ref, set, onValue, get }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
-// ✅ 你的 Firebase 設定
 const firebaseConfig = {
   apiKey: "AIzaSyDzfJa5-M2BNd-Uq1eBoLP_dIKXl9YaYtE",
   authDomain: "badminton-b6875.firebaseapp.com",
@@ -24,11 +22,9 @@ const firebaseConfig = {
   appId: "1:213579206560:web:dd33c912dda52869c65ec5"
 };
 
-// ✅ 初始化（analytics 拿掉，Realtime DB 不需要）
 const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app); // ← 這行之前漏掉了
+const db  = getDatabase(app);
 
-/* ── helpers ── */
 const uid = () => Math.random().toString(36).slice(2,9);
 
 async function dbGet(path) {
@@ -38,7 +34,6 @@ async function dbGet(path) {
 function dbSet(path, val) { return set(ref(db, path), val); }
 function dbListen(path, cb) { onValue(ref(db, path), s => cb(s.val())); }
 
-/* ── defaults ── */
 const DEFAULT_EVENTS = [{
   id:"demo1", title:"羽球同樂會", date:"2026-05-20", time:"19:00",
   location:"XX體育館 3號場", maxPlayers:12,
@@ -46,7 +41,6 @@ const DEFAULT_EVENTS = [{
   registrations:{}, waitlist:{}, createdAt: Date.now()
 }];
 
-/* ── init DB if empty ── */
 (async () => {
   try {
     const existing = await dbGet("events");
@@ -54,7 +48,7 @@ const DEFAULT_EVENTS = [{
       const evMap = {};
       DEFAULT_EVENTS.forEach(e => { evMap[e.id] = e; });
       await dbSet("events", evMap);
-      await dbSet("adminPass", "0123");
+      await dbSet("adminPass", "admin123");
     }
     initApp();
   } catch(e) {
@@ -67,20 +61,16 @@ const DEFAULT_EVENTS = [{
   }
 })();
 
-/* ══════════════════════════════════════════════
-   APP
-══════════════════════════════════════════════ */
 function initApp() {
   let state = { events:{}, adminPass:"admin123", adminAuth:false, view:"events", modal:null };
 
   dbListen("events",    val => { state.events    = val || {}; render(); });
   dbListen("adminPass", val => { if(val) state.adminPass = val; });
 
-  /* ── mutations ── */
+  /* ── DB mutations ── */
   async function mutateEvent(id, fn) {
     const snap = await dbGet(`events/${id}`);
-    const next = fn(snap);
-    await dbSet(`events/${id}`, next);
+    await dbSet(`events/${id}`, fn(snap));
   }
 
   async function handleSignup(evId, name) {
@@ -91,7 +81,7 @@ function initApp() {
     const wait = Object.values(ev.waitlist || {});
     if ([...regs,...wait].some(r => r.name === name))
       return flash("此姓名已報名或候補", false);
-    const rec = { id:uid(), name, ts:Date.now() };
+    const rec = { id:uid(), name, ts:Date.now(), paid:false };
     if (regs.length < ev.maxPlayers) {
       await dbSet(`events/${evId}/registrations/${rec.id}`, rec);
       flash("✅ 報名成功！");
@@ -110,7 +100,7 @@ function initApp() {
     const wait = Object.values(ev.waitlist || {});
     if ([...regs,...wait].some(r => r.name === name))
       return flash("此姓名已報名或候補", false);
-    const rec = { id:uid(), name, ts:Date.now() };
+    const rec = { id:uid(), name, ts:Date.now(), paid:false };
     await dbSet(`events/${evId}/waitlist/${rec.id}`, rec);
     flash("✅ 已加入候補！");
     closeModal();
@@ -133,8 +123,15 @@ function initApp() {
       }
       return { ...ev, registrations:regs, waitlist:wait };
     });
-    flash("已取消");
+    flash("已取消報名");
     closeModal();
+  }
+
+  async function togglePaid(evId, recId, fromList, newVal) {
+    const path = fromList === "reg"
+      ? `events/${evId}/registrations/${recId}/paid`
+      : `events/${evId}/waitlist/${recId}/paid`;
+    await dbSet(path, newVal);
   }
 
   async function addEvent(f) {
@@ -168,7 +165,7 @@ function initApp() {
     flash("密碼已更新");
   }
 
-  /* ── UI ── */
+  /* ── Flash ── */
   let flashTimer;
   function flash(msg, ok=true) {
     const el = document.getElementById("flash");
@@ -180,12 +177,15 @@ function initApp() {
   function openModal(type, data={}) { state.modal={type,...data}; render(); }
   function closeModal() { state.modal=null; render(); }
 
+  /* ══════════════════════════════════
+     RENDER
+  ══════════════════════════════════ */
   function render() {
     const appEl = document.getElementById("app");
-    const evArr = Object.values(state.events).sort((a,b) => (b.createdAt||0)-(a.createdAt||0));
-    appEl.innerHTML = topbar() +
-      `<div class="page">${state.view==="events" ? eventsPage(evArr) : adminPage(evArr)}</div>` +
-      (state.modal ? modalOverlay() : "");
+    const evArr = Object.values(state.events).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    appEl.innerHTML = topbar()
+      + `<div class="page">${state.view==="events" ? eventsPage(evArr) : adminPage(evArr)}</div>`
+      + (state.modal ? modalOverlay() : "");
     bindEvents();
   }
 
@@ -196,53 +196,91 @@ function initApp() {
         <button class="nav-btn ${state.view==="events"?"active":""}" data-view="events">活動</button>
         <button class="nav-btn ${state.view==="admin" ?"active":""}" data-view="admin">後台</button>
       </nav>
-    </header>
-    <div class="sync-bar">🌐 多人即時同步 · Firebase Realtime Database</div>`;
+    </header>`;
   }
 
+  /* ══ 前台 ══ */
   function eventsPage(evArr) {
     if (!evArr.length) return `<div class="empty">目前沒有活動</div>`;
-    return `<div class="sec-title">即將舉辦</div>` + evArr.map(eventCard).join("");
+    return evArr.map(eventCard).join("");
   }
 
   function eventCard(ev) {
-    const regs = Object.values(ev.registrations||{});
-    const wait = Object.values(ev.waitlist||{});
+    const regs = Object.values(ev.registrations||{}).sort((a,b)=>a.ts-b.ts);
+    const wait = Object.values(ev.waitlist||{}).sort((a,b)=>a.ts-b.ts);
     const full = regs.length >= ev.maxPlayers;
     const pct  = Math.min(100, regs.length / ev.maxPlayers * 100);
+    const paidCount = regs.filter(r=>r.paid).length;
+
     return `<div class="card">
       <div class="card-top">
         <h2 class="ev-title">${esc(ev.title)}</h2>
         <span class="badge ${full?"gold":"green"}">${full?"🔶 額滿":"🟢 報名中"}</span>
       </div>
       <div class="meta">
-        <span>📅 ${ev.date}</span><span>🕐 ${ev.time}</span>
+        <span>📅 ${ev.date}</span>
+        <span>🕐 ${ev.time}</span>
         ${ev.location?`<span>📍 ${esc(ev.location)}</span>`:""}
       </div>
       <div class="prog-track"><div class="prog-bar ${full?"full":""}" style="width:${pct}%"></div></div>
       <div class="prog-label">
         <span>報名 ${regs.length} / ${ev.maxPlayers}</span>
-        <span>候補 ${wait.length}</span>
+        <span>候補 ${wait.length} 人</span>
       </div>
       ${ev.note?`<p class="note">${esc(ev.note)}</p>`:""}
+
       <div class="card-btns">
-        <button class="btn-primary" data-action="signup" data-id="${ev.id}">${full?"➕ 加入候補":"✏️ 我要報名"}</button>
-        <button class="btn-ghost"   data-action="status" data-id="${ev.id}">查看名單 / 取消</button>
+        <button class="btn-primary" data-action="signup" data-id="${ev.id}">
+          ${full?"➕ 加入候補":"✏️ 我要報名"}
+        </button>
+        <button class="btn-ghost" data-action="cancel-self" data-id="${ev.id}">
+          🚪 取消我的報名
+        </button>
+      </div>
+
+      <!-- 公開名單 -->
+      <div class="pub-list">
+        <div class="pub-list-hd">
+          <span>📋 報名名單</span>
+          <span class="paid-pill">已繳費 ${paidCount} / ${regs.length}</span>
+        </div>
+        ${!regs.length
+          ? `<div class="empty-sm">尚無人報名，快來搶位！</div>`
+          : regs.map((r,i)=>`
+            <div class="pub-row">
+              <span class="pub-num">${i+1}</span>
+              <span class="pub-name">${esc(r.name)}</span>
+              <span class="pub-paid ${r.paid?"is-paid":""}">${r.paid?"✅ 已繳費":"—"}</span>
+            </div>`).join("")
+        }
+        ${wait.length ? `
+          <div class="pub-list-hd" style="margin-top:14px">
+            <span>⏳ 候補名單</span>
+          </div>
+          ${wait.map((r,i)=>`
+            <div class="pub-row wait-row">
+              <span class="pub-num">候${i+1}</span>
+              <span class="pub-name">${esc(r.name)}</span>
+              <span class="pub-paid">候補中</span>
+            </div>`).join("")}
+        ` : ""}
       </div>
     </div>`;
   }
 
+  /* ══ 後台 ══ */
   function adminPage(evArr) {
     if (!state.adminAuth) return `
       <div class="login-box">
-        <div class="login-icon">🔐</div>
+        <div style="font-size:44px;margin-bottom:8px">🔐</div>
         <h2>後台登入</h2>
         <input class="inp" type="password" id="admin-pass" placeholder="管理員密碼"/>
         <button class="btn-primary w100" id="admin-login-btn">登入</button>
         <p class="hint">預設密碼：admin123</p>
       </div>`;
+
     return `
-      <div class="admin-header">
+      <div class="admin-hd">
         <div class="sec-title">後台管理</div>
         <button class="btn-primary" data-action="addEvent">＋ 新增活動</button>
       </div>
@@ -258,6 +296,8 @@ function initApp() {
   function adminCard(ev) {
     const regs = Object.values(ev.registrations||{}).sort((a,b)=>a.ts-b.ts);
     const wait = Object.values(ev.waitlist||{}).sort((a,b)=>a.ts-b.ts);
+    const paidCount = regs.filter(r=>r.paid).length;
+
     return `<div class="card">
       <div class="card-top">
         <div>
@@ -269,23 +309,55 @@ function initApp() {
           <button class="btn-danger sm" data-action="deleteEvent" data-id="${ev.id}">刪除</button>
         </div>
       </div>
-      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <span class="badge green">報名 ${regs.length}/${ev.maxPlayers}</span>
         <span class="badge gold">候補 ${wait.length}</span>
+        <span class="badge blue">已繳費 ${paidCount}/${regs.length}</span>
       </div>
-      ${regs.length?`<div class="list-title">報名名單</div>`+regs.map((r,i)=>`
-        <div class="list-row">
-          <span>${i+1}. ${esc(r.name)}</span>
-          <button class="btn-ghost sm" data-action="remove" data-evid="${ev.id}" data-recid="${r.id}" data-from="reg">移除</button>
-        </div>`).join(""):""}
-      ${wait.length?`<div class="list-title">候補名單</div>`+wait.map((r,i)=>`
-        <div class="list-row">
-          <span>候補${i+1}. ${esc(r.name)}</span>
-          <button class="btn-ghost sm" data-action="remove" data-evid="${ev.id}" data-recid="${r.id}" data-from="wait">移除</button>
-        </div>`).join(""):""}
+
+      <!-- 繳費管理表 -->
+      ${regs.length ? `
+        <div class="pay-table">
+          <div class="pay-head">
+            <span class="col-num">#</span>
+            <span class="col-name">姓名</span>
+            <span class="col-paid">繳費</span>
+            <span class="col-del"></span>
+          </div>
+          ${regs.map((r,i)=>`
+            <div class="pay-row ${r.paid?"row-paid":""}">
+              <span class="col-num">${i+1}</span>
+              <span class="col-name">${esc(r.name)}</span>
+              <span class="col-paid">
+                <label class="toggle">
+                  <input type="checkbox" class="pay-cb"
+                    data-evid="${ev.id}" data-recid="${r.id}" data-from="reg"
+                    ${r.paid?"checked":""}>
+                  <span class="tog-track"><span class="tog-thumb"></span></span>
+                </label>
+              </span>
+              <span class="col-del">
+                <button class="btn-ghost sm icon-btn" data-action="remove"
+                  data-evid="${ev.id}" data-recid="${r.id}" data-from="reg" title="移除">✕</button>
+              </span>
+            </div>`).join("")}
+        </div>
+      ` : `<div class="empty-sm" style="margin-top:10px">尚無報名</div>`}
+
+      ${wait.length ? `
+        <div class="list-title" style="margin-top:14px">候補名單</div>
+        ${wait.map((r,i)=>`
+          <div class="list-row">
+            <span>候補${i+1}. ${esc(r.name)}</span>
+            <button class="btn-ghost sm" data-action="remove"
+              data-evid="${ev.id}" data-recid="${r.id}" data-from="wait">✕ 移除</button>
+          </div>`).join("")}
+      ` : ""}
     </div>`;
   }
 
+  /* ── Modals ── */
   function modalOverlay() {
     return `<div class="overlay" id="overlay"><div class="modal-wrap">${modalContent()}</div></div>`;
   }
@@ -293,6 +365,7 @@ function initApp() {
   function modalContent() {
     const m  = state.modal;
     const ev = m.evId ? state.events[m.evId] : null;
+
     if (m.type==="signup") {
       const regs = Object.values(ev.registrations||{});
       const full = regs.length >= ev.maxPlayers;
@@ -308,26 +381,21 @@ function initApp() {
         <button class="btn-ghost w100 mt8" id="m-close">取消</button>
       </div>`;
     }
-    if (m.type==="status") {
-      const regs = Object.values(ev.registrations||{}).sort((a,b)=>a.ts-b.ts);
-      const wait = Object.values(ev.waitlist||{}).sort((a,b)=>a.ts-b.ts);
-      return `<div class="modal" style="max-width:460px">
-        <h3 class="modal-title">名單 / 取消報名</h3>
-        <div class="list-title">報名名單 ${regs.length}/${ev.maxPlayers}</div>
-        ${!regs.length?`<div class="empty-sm">尚無人報名</div>`:""}
-        ${regs.map((r,i)=>`<div class="list-row"><span>${i+1}. ${esc(r.name)}</span><span class="badge green">報名</span></div>`).join("")}
-        ${wait.length?`<div class="list-title" style="margin-top:10px">候補名單</div>`+
-          wait.map((r,i)=>`<div class="list-row"><span>候補${i+1}. ${esc(r.name)}</span><span class="badge gold">候補</span></div>`).join(""):""}
-        <hr class="divider"/>
-        <div class="lbl" style="margin-bottom:8px">取消我的報名</div>
-        <input class="inp" id="m-query" placeholder="輸入你的姓名搜尋"/>
-        <div class="modal-btns" style="margin-top:10px">
+
+    if (m.type==="cancel-self") {
+      return `<div class="modal">
+        <h3 class="modal-title">取消我的報名</h3>
+        <p class="modal-sub">${esc(ev.title)} · ${ev.date} ${ev.time}</p>
+        <label class="lbl">輸入你的姓名</label>
+        <input class="inp" id="m-query" placeholder="搜尋姓名…" autofocus/>
+        <div class="modal-btns" style="margin-top:4px">
           <button class="btn-primary f1" id="m-lookup">查詢</button>
           <button class="btn-ghost f1" id="m-close">關閉</button>
         </div>
         <div id="m-found"></div>
       </div>`;
     }
+
     if (m.type==="addEvent"||m.type==="editEvent") {
       const f = m.f||{};
       return `<div class="modal">
@@ -353,6 +421,7 @@ function initApp() {
     return "";
   }
 
+  /* ── Bind ── */
   function bindEvents() {
     document.querySelectorAll(".nav-btn").forEach(b =>
       b.addEventListener("click", () => { state.view=b.dataset.view; render(); }));
@@ -375,11 +444,19 @@ function initApp() {
       if (p) updatePass(p);
     });
 
+    /* 繳費 toggle */
+    document.querySelectorAll(".pay-cb").forEach(cb => {
+      cb.addEventListener("change", () => {
+        togglePaid(cb.dataset.evid, cb.dataset.recid, cb.dataset.from, cb.checked);
+      });
+    });
+
+    /* action buttons */
     document.querySelectorAll("[data-action]").forEach(b => {
       b.addEventListener("click", () => {
         const a=b.dataset.action, id=b.dataset.id;
-        if (a==="signup")      openModal("signup",  { evId:id });
-        if (a==="status")      openModal("status",  { evId:id });
+        if (a==="signup")      openModal("signup",      { evId:id });
+        if (a==="cancel-self") openModal("cancel-self", { evId:id });
         if (a==="addEvent")    openModal("addEvent");
         if (a==="editEvent") {
           const ev = state.events[id];
@@ -396,10 +473,11 @@ function initApp() {
     document.getElementById("m-confirm-wait")?.addEventListener("click", () =>
       handleWaitlist(state.modal.evId, document.getElementById("m-name").value));
     document.getElementById("m-name")?.addEventListener("keydown", e => {
-      if (e.key==="Enter") (document.getElementById("m-confirm-reg") || document.getElementById("m-confirm-wait")).click();
+      if (e.key==="Enter")
+        (document.getElementById("m-confirm-reg")||document.getElementById("m-confirm-wait")).click();
     });
 
-    document.getElementById("m-lookup")?.addEventListener("click", () => {
+    function doLookup() {
       const q = document.getElementById("m-query").value.trim();
       if (!q) return;
       const ev   = state.events[state.modal.evId];
@@ -408,7 +486,10 @@ function initApp() {
       const found = [...regs.map(r=>({...r,_l:"reg"})), ...wait.map(r=>({...r,_l:"wait"}))]
         .find(r => r.name.includes(q));
       const div = document.getElementById("m-found");
-      if (!found) { div.innerHTML=`<div class="empty-sm" style="color:#ff5f57">查無此人</div>`; return; }
+      if (!found) {
+        div.innerHTML=`<div class="empty-sm" style="color:#ff5f57;margin-top:10px">查無此人，請確認姓名</div>`;
+        return;
+      }
       div.innerHTML=`<div class="found-box">
         <div class="found-name">${esc(found.name)}</div>
         <div class="found-status">${found._l==="reg"?"✅ 已報名":"⏳ 候補中"}</div>
@@ -416,9 +497,10 @@ function initApp() {
       </div>`;
       document.getElementById("m-cancel-btn").addEventListener("click", () =>
         handleCancel(state.modal.evId, found.id, found._l));
-    });
+    }
+    document.getElementById("m-lookup")?.addEventListener("click", doLookup);
     document.getElementById("m-query")?.addEventListener("keydown", e => {
-      if (e.key==="Enter") document.getElementById("m-lookup").click();
+      if (e.key==="Enter") doLookup();
     });
 
     document.getElementById("m-save")?.addEventListener("click", () => {
@@ -435,7 +517,9 @@ function initApp() {
   }
 
   function esc(s="") {
-    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    return String(s)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
 
   render();
@@ -450,6 +534,7 @@ function initApp() {
   --line:   #1e3048;
   --accent: #00d68f;
   --gold:   #f5a623;
+  --blue:   #4da6ff;
   --danger: #ff5f57;
   --text:   #dce8f5;
   --sub:    #7a9ab5;
@@ -458,81 +543,123 @@ function initApp() {
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font-family: 'Noto Sans TC', sans-serif; min-height: 100vh; }
 
+/* ── Topbar ── */
 .topbar { background: var(--panel); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; height: 54px; position: sticky; top: 0; z-index: 100; }
 .logo { font-family: 'Teko', sans-serif; font-size: 26px; letter-spacing: 2px; color: var(--accent); }
 nav { display: flex; gap: 6px; }
 .nav-btn { padding: 5px 16px; border-radius: 20px; border: none; cursor: pointer; font-weight: 700; font-size: 13px; font-family: inherit; background: transparent; color: var(--sub); transition: all .2s; }
 .nav-btn.active { background: var(--accent); color: #0c1520; }
-.sync-bar { text-align: center; padding: 5px; font-size: 11px; color: var(--muted); background: var(--panel); border-bottom: 1px solid var(--line); }
 
-.page { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
-.sec-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+/* ── Page ── */
+.page { max-width: 700px; margin: 0 auto; padding: 20px 16px 40px; }
+.sec-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
 .empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 15px; }
-.empty-sm { font-size: 13px; color: var(--muted); padding: 8px 0; }
+.empty-sm { font-size: 13px; color: var(--muted); padding: 6px 0; }
 
+/* ── Card ── */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; margin-bottom: 16px; }
 .card-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
-.ev-title { font-size: 20px; font-weight: 900; color: var(--text); }
+.ev-title { font-size: 20px; font-weight: 900; }
 .meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 9px; font-size: 13px; color: var(--sub); }
 .note { font-size: 13px; color: var(--sub); margin-top: 10px; }
+
 .prog-track { height: 5px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
 .prog-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width .5s; }
 .prog-bar.full { background: var(--gold); }
 .prog-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 5px; }
 .card-btns { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 
-.badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 8px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
-.badge.green { background: #00d68f20; color: var(--accent); border: 1px solid #00d68f44; }
-.badge.gold  { background: #f5a62320; color: var(--gold);   border: 1px solid #f5a62344; }
+/* ── Public list ── */
+.pub-list { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.pub-list-hd { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; color: var(--sub); margin-bottom: 8px; }
+.paid-pill { font-size: 11px; color: var(--accent); background: #00d68f15; border: 1px solid #00d68f33; padding: 2px 9px; border-radius: 99px; }
+.pub-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.pub-row:last-child { border-bottom: none; }
+.wait-row { opacity: .65; }
+.pub-num  { flex: 0 0 24px; font-size: 11px; color: var(--muted); font-weight: 700; }
+.pub-name { flex: 1; font-size: 14px; font-weight: 600; }
+.pub-paid { font-size: 12px; color: var(--muted); }
+.pub-paid.is-paid { color: var(--accent); }
 
-.btn-primary, .btn-ghost, .btn-danger { padding: 10px 22px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 14px; font-family: inherit; transition: opacity .15s; border: none; }
-.btn-primary { background: var(--accent); color: #0c1520; }
-.btn-ghost   { background: transparent; color: var(--sub); border: 1px solid var(--line); }
-.btn-danger  { background: var(--danger); color: #fff; }
-.btn-primary:hover { opacity: .85; } .btn-ghost:hover { background: var(--line); } .btn-danger:hover { opacity: .85; }
-.sm { padding: 5px 12px !important; font-size: 12px !important; }
-.w100 { width: 100%; } .mt8 { margin-top: 8px; } .f1 { flex: 1; }
+/* ── Badges ── */
+.badge { display: inline-flex; align-items: center; border-radius: 8px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
+.badge.green { background:#00d68f18; color:var(--accent); border:1px solid #00d68f44; }
+.badge.gold  { background:#f5a62318; color:var(--gold);   border:1px solid #f5a62344; }
+.badge.blue  { background:#4da6ff18; color:var(--blue);   border:1px solid #4da6ff44; }
 
-.inp { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; color: var(--text); font-size: 14px; font-family: inherit; outline: none; margin-bottom: 12px; display: block; }
-.inp:focus { border-color: var(--accent); }
-textarea.inp { resize: vertical; }
-.lbl { font-size: 12px; color: var(--sub); font-weight: 700; margin-bottom: 5px; display: block; }
+/* ── Buttons ── */
+.btn-primary,.btn-ghost,.btn-danger { padding:10px 22px; border-radius:10px; cursor:pointer; font-weight:700; font-size:14px; font-family:inherit; transition:opacity .15s; border:none; }
+.btn-primary { background:var(--accent); color:#0c1520; }
+.btn-ghost   { background:transparent; color:var(--sub); border:1px solid var(--line); }
+.btn-danger  { background:var(--danger); color:#fff; }
+.btn-primary:hover { opacity:.85; } .btn-ghost:hover { background:var(--line); } .btn-danger:hover { opacity:.85; }
+.sm { padding:5px 12px !important; font-size:12px !important; border-radius:8px !important; }
+.icon-btn { padding:4px 8px !important; }
+.w100 { width:100%; } .mt8 { margin-top:8px; } .f1 { flex:1; }
 
-.admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-.list-title { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: 1px; margin: 10px 0 5px; }
-.list-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+/* ── Inputs ── */
+.inp { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; margin-bottom:12px; display:block; }
+.inp:focus { border-color:var(--accent); }
+textarea.inp { resize:vertical; }
+.lbl { font-size:12px; color:var(--sub); font-weight:700; margin-bottom:5px; display:block; }
 
-.login-box { max-width: 360px; margin: 60px auto; padding: 28px; background: var(--card); border: 1px solid var(--line); border-radius: 20px; text-align: center; }
-.login-icon { font-size: 44px; margin-bottom: 8px; }
-.login-box h2 { color: var(--accent); margin-bottom: 20px; font-size: 20px; }
-.hint { font-size: 11px; color: var(--muted); margin-top: 12px; }
+/* ── Pay table ── */
+.pay-table { margin-top:12px; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.pay-head,.pay-row { display:flex; align-items:center; gap:8px; padding:8px 14px; }
+.pay-head { background:var(--bg); font-size:11px; font-weight:700; color:var(--muted); letter-spacing:1px; border-bottom:1px solid var(--line); }
+.pay-row { border-bottom:1px solid var(--line); font-size:14px; transition:background .15s; }
+.pay-row:last-child { border-bottom:none; }
+.pay-row.row-paid { background:#00d68f08; }
+.col-num  { flex:0 0 24px; font-size:12px; color:var(--muted); font-weight:700; }
+.col-name { flex:1; font-weight:600; }
+.col-paid { flex:0 0 56px; display:flex; justify-content:center; }
+.col-del  { flex:0 0 36px; display:flex; justify-content:flex-end; }
 
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px; }
-.modal-wrap { width: 100%; max-width: 440px; }
-.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; max-height: 90vh; overflow-y: auto; }
-.modal-title { font-size: 18px; font-weight: 800; color: var(--accent); margin-bottom: 4px; }
-.modal-sub   { font-size: 13px; color: var(--sub); margin-bottom: 18px; }
-.modal-btns  { display: flex; gap: 10px; }
-.two-col     { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.divider     { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
-.found-box   { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 12px; }
-.found-name  { font-weight: 700; font-size: 16px; }
-.found-status{ font-size: 13px; color: var(--sub); margin: 4px 0 12px; }
+/* Toggle switch */
+.toggle { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
+.toggle input { opacity:0; width:0; height:0; position:absolute; }
+.tog-track { width:38px; height:20px; background:var(--line); border-radius:99px; position:relative; transition:background .2s; }
+.tog-thumb { position:absolute; width:14px; height:14px; background:var(--sub); border-radius:50%; top:3px; left:3px; transition:transform .2s, background .2s; }
+.toggle input:checked ~ .tog-track { background:var(--accent); }
+.toggle input:checked ~ .tog-track .tog-thumb { transform:translateX(18px); background:#0c1520; }
 
-.flash { position: fixed; top: -60px; left: 50%; transform: translateX(-50%); padding: 9px 24px; border-radius: 99px; font-weight: 700; font-size: 13px; z-index: 999; white-space: nowrap; pointer-events: none; transition: top .3s ease; }
-.flash.show { top: 14px; }
-.flash.ok  { background: var(--accent); color: #0c1520; }
-.flash.err { background: var(--danger); color: #fff; }
+/* ── Admin ── */
+.admin-hd { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+.list-title { font-size:11px; color:var(--muted); font-weight:700; letter-spacing:1px; margin:10px 0 5px; }
+.list-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); font-size:14px; }
+
+/* ── Login ── */
+.login-box { max-width:360px; margin:60px auto; padding:28px; background:var(--card); border:1px solid var(--line); border-radius:20px; text-align:center; }
+.login-box h2 { color:var(--accent); margin-bottom:20px; font-size:20px; }
+.hint { font-size:11px; color:var(--muted); margin-top:12px; }
+
+/* ── Modal ── */
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,.75); display:flex; align-items:center; justify-content:center; z-index:200; padding:16px; }
+.modal-wrap { width:100%; max-width:440px; }
+.modal { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:28px; max-height:90vh; overflow-y:auto; }
+.modal-title { font-size:18px; font-weight:800; color:var(--accent); margin-bottom:4px; }
+.modal-sub   { font-size:13px; color:var(--sub); margin-bottom:18px; }
+.modal-btns  { display:flex; gap:10px; }
+.two-col     { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.found-box   { background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-top:14px; }
+.found-name  { font-weight:700; font-size:16px; margin-bottom:4px; }
+.found-status{ font-size:13px; color:var(--sub); margin-bottom:12px; }
+
+/* ── Flash ── */
+.flash { position:fixed; top:-60px; left:50%; transform:translateX(-50%); padding:9px 24px; border-radius:99px; font-weight:700; font-size:13px; z-index:999; white-space:nowrap; pointer-events:none; transition:top .3s ease; }
+.flash.show { top:14px; }
+.flash.ok  { background:var(--accent); color:#0c1520; }
+.flash.err { background:var(--danger); color:#fff; }
 
 input[type=date]::-webkit-calendar-picker-indicator,
-input[type=time]::-webkit-calendar-picker-indicator { filter: invert(.6); }
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
+input[type=time]::-webkit-calendar-picker-indicator { filter:invert(.6); }
+::-webkit-scrollbar { width:5px; }
+::-webkit-scrollbar-thumb { background:var(--line); border-radius:99px; }
 
-@media (max-width: 500px) {
-  .two-col { grid-template-columns: 1fr; }
-  .card-btns { flex-direction: column; }
-  .modal-btns { flex-direction: column; }
+@media (max-width:500px) {
+  .two-col { grid-template-columns:1fr; }
+  .card-btns { flex-direction:column; }
+  .modal-btns { flex-direction:column; }
 }
 </style>
 </head>
